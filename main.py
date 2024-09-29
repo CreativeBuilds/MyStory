@@ -294,9 +294,9 @@ def editor_mode():
         print("\nStory Title Options:")
         for index, title in enumerate(story_process["story_title_options"], 1):
             print(f"{index}. {title}")
-        print("4. Enter your own title")
+        print("\nOr enter your own title")
 
-        title_choice = get_user_input("Select a story title or enter your own (enter the number or type your title): ")
+        title_choice = get_user_input("Select a story title or enter your own: ")
         
         if title_choice.isdigit() and 1 <= int(title_choice) <= 3:
             selected_title = story_process["story_title_options"][int(title_choice) - 1]
