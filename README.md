@@ -20,7 +20,7 @@ The story follows A-7, a robotic police officer in Neo-Tokyo, as it begins to ex
 
 The `examples` folder also includes an image file that visualizes the story structure. This can help you understand how the branching narrative works in practice.
 
-![Story Structure Visualization](examples/story_structure.png)
+![Story Structure Visualization](./examples/story_creation.png)
 
 This visualization shows how different choices lead to different chapters and story outcomes, illustrating the non-linear nature of the interactive stories created with this tool.
 
