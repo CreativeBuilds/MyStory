@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 import shlex
 import ast  # Add this at the top of the file with other imports
+import traceback
 
 load_dotenv()
 
@@ -133,10 +134,12 @@ def process_custom_choice(custom_choice: str, call_to_action: str) -> str:
         **{"client": client}
     )["rephrased_choice"]
 
+def generate_safe_filename(title: str) -> str:
+    return "".join([c for c in title.replace(' ', '_') if c.isalnum() or c in ('-', '_')]).rstrip() + '.json'
+
 def save_story(story: Story):
-    # Ensure the title is safe for use as a filename by replacing spaces with underscores
-    safe_title = "".join([c for c in story.title.replace(' ', '_') if c.isalnum() or c in ('-', '_')]).rstrip()
-    story_file = os.path.join(STORIES_FOLDER, f"{safe_title}.json")
+    safe_filename = generate_safe_filename(story.title)
+    story_file = os.path.join(STORIES_FOLDER, safe_filename)
     
     try:
         with open(story_file, 'w', encoding='utf-8') as f:
@@ -146,12 +149,14 @@ def save_story(story: Story):
         print(f"\nStory saved successfully to: {quoted_path}")
     except Exception as e:
         print(f"Error saving story: {e}")
+        traceback.print_exc()
 
 def load_story(story_title: str) -> Optional[Story]:
-    safe_title = "".join([c for c in story_title if c.isalnum() or c in (' ', '-', '_')]).rstrip()
-    story_file = os.path.join(STORIES_FOLDER, f"{safe_title}.json")
+    safe_filename = generate_safe_filename(story_title)
+    story_file = os.path.join(STORIES_FOLDER, safe_filename)
     
     if not os.path.exists(story_file):
+        print(f"No story file found: {story_file}")
         return None
 
     try:
@@ -164,6 +169,7 @@ def load_story(story_title: str) -> Optional[Story]:
         return story
     except Exception as e:
         print(f"Error loading story: {e}")
+        traceback.print_exc()
         return None
 
 def _load_chapter_recursive(chapter_data: Dict) -> Chapter:
@@ -239,25 +245,49 @@ def parse_content(content):
         return '\n\n'.join(content)
     return content
 
-def editor_mode(story_title: Optional[str] = None):
-    print("Entering editor mode...")
+def list_existing_stories():
+    stories = []
+    for filename in os.listdir(STORIES_FOLDER):
+        if filename.endswith('.json'):
+            story_title = filename[:-5].replace('_', ' ')
+            stories.append(story_title)
+    return stories
 
-    if story_title:
-        story = load_story(story_title)
-        if story:
-            print(f"Loaded existing story: {story.title}")
+def editor_mode():
+    print("Welcome to the Story Editor!")
+
+    # List existing stories
+    existing_stories = list_existing_stories()
+    if existing_stories:
+        print("\nExisting stories:")
+        for i, story_title in enumerate(existing_stories, 1):
+            print(f"{i}. {story_title}")
+        print("\nEnter a number to load a story, or 'n' to start a new story")
+
+        choice = get_user_input("Your choice: ")
+        
+        if choice.lower() == 'n':
+            story = None
+        elif choice.isdigit() and 1 <= int(choice) <= len(existing_stories):
+            story_title = existing_stories[int(choice) - 1]
+            story = load_story(story_title)
+            if story:
+                print(f"\nLoaded existing story: {story.title}")
+            else:
+                print(f"\nFailed to load story: {story_title}")
+                return
         else:
-            print(f"No existing story found with title: {story_title}")
-            story_title = None
+            print("Invalid choice. Starting a new story.")
+            story = None
+    else:
+        print("No existing stories found. Starting a new story.")
+        story = None
 
-    if not story_title:
-        # Step 1: Get story idea from the user
+    if not story:
+        # Create a new story
         initial_idea = get_user_input("Enter your story idea: ")
-
-        # Step 2: Process story idea and get title options
         story_process = process_story_idea(initial_idea)
 
-        # Present the rehashed description and title options to the user
         print("\nRehashed Description:")
         print(story_process["rehashed_description"])
 
@@ -266,7 +296,6 @@ def editor_mode(story_title: Optional[str] = None):
             print(f"{index}. {title}")
         print("4. Enter your own title")
 
-        # Step 3: User selects a title or enters their own
         title_choice = get_user_input("Select a story title or enter your own (enter the number or type your title): ")
         
         if title_choice.isdigit() and 1 <= int(title_choice) <= 3:
@@ -278,7 +307,7 @@ def editor_mode(story_title: Optional[str] = None):
 
     current_chapter_id = None
     story_summary = story.description
-    story_modified = False  # Flag to track if the story has been modified
+    story_modified = False
 
     while True:
         if current_chapter_id:
