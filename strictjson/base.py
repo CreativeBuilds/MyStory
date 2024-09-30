@@ -279,7 +279,7 @@ def check_key(field: str, output_format, new_output_format, delimiter: str, deli
         output_d = {}
         # check key appears for each element in the output
         output_d = convert_to_dict(field, output_format.keys(), cur_delimiter)
-            
+        
         # after creating dictionary, step into next layer
         for key, value in output_d.items():
             # # if the output is a bool type, convert true and false into True and False for ast.literal_eval parsing
