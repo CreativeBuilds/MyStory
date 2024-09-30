@@ -31,7 +31,6 @@ os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
 # MODEL = "mistralai/mistral-7b-instruct:nitro"
 MODEL = "nousresearch/hermes-3-llama-3.1-70b"
 
-
 # Initialize OpenAI client
 client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY"),
@@ -45,6 +44,7 @@ os.makedirs(STORIES_FOLDER, exist_ok=True)
 # Set up logging
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log.txt')
 
+# Logging and Output Functions
 class Logger:
     def __init__(self, log_file):
         self.log_file = log_file
@@ -118,6 +118,7 @@ def clear_console():
     os.system('cls' if os.name == 'nt' else 'clear')
     # Removed the logging of console clearing
 
+# Story and Chapter Classes
 class ChapterVersion:
     def __init__(self, content: str, call_to_action: str, choices: List[str]):
         self.id = str(uuid.uuid4())
@@ -216,6 +217,7 @@ class Story:
             "chapters": [chapter.to_dict() for chapter in self.root_chapters]
         }
 
+# Parsing and Processing Functions
 def parse_list_or_string(data):
     """Parse a string representation of a list or return the original list."""
     if isinstance(data, str):
@@ -250,6 +252,18 @@ def process_story_idea(story_idea: str) -> Dict:
     result["story_title_options"] = parse_title_options(result["story_title_options"])
     return result
 
+def parse_content(content):
+    if isinstance(content, list):
+        return '\n\n'.join(content)
+    try:
+        literal_content = ast.literal_eval(content)
+        if isinstance(literal_content, list):
+            return '\n\n'.join(literal_content)
+    except Exception:
+        pass
+    return content
+
+# Content Generation Functions
 def generate_content(prompt: str, output_format: Dict, system_prompt: str = "", temperature: float = 0.7) -> Dict:
     """Generic function to generate content using the AI model."""
     try:
@@ -360,6 +374,7 @@ def process_custom_choice(custom_choice: str, call_to_action: str) -> str:
         **{"client": client}
     )["rephrased_choice"]
 
+# File and Story Management Functions
 def generate_safe_filename(title: str) -> str:
     return "".join([c for c in title.replace(' ', '_') if c.isalnum() or c in ('-', '_')]).rstrip() + '.json'
 
@@ -422,6 +437,22 @@ def _load_chapter_version(version_data: Dict) -> ChapterVersion:
     version.children = _load_chapters_recursive(version_data.get('children', []))
     return version
 
+def list_existing_stories():
+    stories = []
+    try:
+        for filename in os.listdir(STORIES_FOLDER):
+            if filename.endswith('.json'):
+                file_path = os.path.join(STORIES_FOLDER, filename)
+                if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
+                    story_title = filename[:-5].replace('_', ' ')
+                    stories.append(story_title)
+    except FileNotFoundError:
+        logger.log(f"Stories folder not found: {STORIES_FOLDER}")
+    except PermissionError:
+        logger.log(f"Permission denied when accessing stories folder: {STORIES_FOLDER}")
+    return stories
+
+# Chapter and Version Management Functions
 def increment_suffix(suffix: str) -> str:
     if suffix == 'z':
         return 'aa'
@@ -463,32 +494,6 @@ def display_chapter_tree(chapters: List[Chapter], indent: str = "", current_vers
         logger.log(f"{indent}{chapter.id}: {chapter.title} {version_indicator}")
         if latest_version:
             display_chapter_tree(latest_version.children, indent + "  ", current_version)
-
-def parse_content(content):
-    if isinstance(content, list):
-        return '\n\n'.join(content)
-    try:
-        literal_content = ast.literal_eval(content)
-        if isinstance(literal_content, list):
-            return '\n\n'.join(literal_content)
-    except Exception:
-        pass
-    return content
-
-def list_existing_stories():
-    stories = []
-    try:
-        for filename in os.listdir(STORIES_FOLDER):
-            if filename.endswith('.json'):
-                file_path = os.path.join(STORIES_FOLDER, filename)
-                if os.path.isfile(file_path) and os.path.getsize(file_path) > 0:
-                    story_title = filename[:-5].replace('_', ' ')
-                    stories.append(story_title)
-    except FileNotFoundError:
-        logger.log(f"Stories folder not found: {STORIES_FOLDER}")
-    except PermissionError:
-        logger.log(f"Permission denied when accessing stories folder: {STORIES_FOLDER}")
-    return stories
 
 def expand_chapter_content(chapter: Chapter, story: Story) -> ChapterVersion:
     latest_version = chapter.get_latest_version()
@@ -545,23 +550,7 @@ def display_version_menu(chapter: Chapter):
         return chapter.versions[-(int(choice))]
     return None
 
-def refine_story_idea(initial_idea: str) -> Dict:
-    while True:
-        story_process = process_story_idea(initial_idea)
-        
-        clear_console()
-        logger.log(f"\nRehashed Description:\n{story_process['rehashed_description']}\n")
-        logger.log("Does this description cover the core idea of what you want?")
-        logger.log("Press Enter or 'y' to accept, or type your feedback to refine the description.")
-        
-        user_response = get_user_input("Your response: ").strip().lower()
-        
-        if user_response == '' or user_response == 'y':
-            logger.log("\nGreat! The description is finalized.")
-            return story_process
-        else:
-            initial_idea += f" | Rehashed description: {story_process['rehashed_description'].strip()} | User feedback: {user_response.strip()}"
-
+# UI and Formatting Functions
 def get_terminal_width() -> int:
     try:
         return shutil.get_terminal_size().columns
@@ -604,6 +593,24 @@ def get_chapter_history(story: Story, current_chapter: Chapter, n: int = 6) -> s
 
     return "\n\n".join(history)
 
+def refine_story_idea(initial_idea: str) -> Dict:
+    while True:
+        story_process = process_story_idea(initial_idea)
+        
+        clear_console()
+        logger.log(f"\nRehashed Description:\n{story_process['rehashed_description']}\n")
+        logger.log("Does this description cover the core idea of what you want?")
+        logger.log("Press Enter or 'y' to accept, or type your feedback to refine the description.")
+        
+        user_response = get_user_input("Your response: ").strip().lower()
+        
+        if user_response == '' or user_response == 'y':
+            logger.log("\nGreat! The description is finalized.")
+            return story_process
+        else:
+            initial_idea += f" | Rehashed description: {story_process['rehashed_description'].strip()} | User feedback: {user_response.strip()}"
+
+# Main Editor Function
 @log_function
 def editor_mode():
     print("Welcome to the Story Editor!")
@@ -878,6 +885,7 @@ def editor_mode():
             save_story(story)
             story_modified = False  # Reset the flag after saving
 
+# Initialization Function
 def initialize_log():
     if os.getenv("C_LOG") == "True":
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
