@@ -14,6 +14,7 @@ from functools import wraps
 from contextlib import contextmanager
 import shutil
 from collections import deque
+import re
 
 try:
     import readline
@@ -28,8 +29,8 @@ os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
 
 # MODEL = "mistralai/mistral-large"
 # MODEL = "openai/gpt-4o-mini"
-# MODEL = "mistralai/mistral-7b-instruct:nitro"
-MODEL = "nousresearch/hermes-3-llama-3.1-70b"
+MODEL = "mistralai/mistral-7b-instruct:nitro"
+# MODEL = "nousresearch/hermes-3-llama-3.1-70b"
 
 # Initialize OpenAI client
 client = OpenAI(
@@ -44,21 +45,39 @@ os.makedirs(STORIES_FOLDER, exist_ok=True)
 # Set up logging
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'log.txt')
 
+# Define the global constant for authors
+# DEFAULT_AUTHORS = "Jane Austen:Ernest Hemingway:Virginia Woolf:Gabriel García Márquez:Toni Morrison:George Orwell:Agatha Christie:Haruki Murakami:Leo Tolstoy:Chimamanda Ngozi Adichie"
+DEFAULT_AUTHORS = "J.R.R. Tolkien:Terry Goodkind:George R.R. Martin"
+# Get authors from environment variable if set, otherwise use default
+AUTHORS = os.getenv("AUTHORS", DEFAULT_AUTHORS).split(":")
+
 # Logging and Output Functions
 class Logger:
     def __init__(self, log_file):
         self.log_file = log_file
         self.silent = False
+        self.privacy_filters = [
+            (re.compile(r'/Users/[^/]+/'), r'~/'),
+            (re.compile(r'C:\\Users\\[^\\]+\\'), r'C:\\Users\\USER\\'),
+            (re.compile(r'/home/[^/]+/'), r'/home/user/'),
+        ]
+
+    def apply_privacy_filter(self, message):
+        for pattern, replacement in self.privacy_filters:
+            message = pattern.sub(replacement, message)
+        return message
 
     def log(self, message, end='\n'):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
+        filtered_message = self.apply_privacy_filter(message)
+        
         if not self.silent:
-            sys.__stdout__.write(message + end)
+            sys.__stdout__.write(filtered_message + end)
             sys.__stdout__.flush()
         
         with open(self.log_file, 'a', encoding='utf-8') as f:
-            log_message = f"[{timestamp}] {message.strip()}"
+            log_message = f"[{timestamp}] {filtered_message.strip()}"
             f.write(log_message + end)
 
     def set_silent(self, silent):
@@ -66,7 +85,8 @@ class Logger:
 
     def log_exception(self, exc_type, exc_value, exc_traceback):
         exception_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
-        self.log(f"An exception occurred:\n{exception_str}")
+        filtered_exception_str = self.apply_privacy_filter(exception_str)
+        self.log(f"An exception occurred:\n{filtered_exception_str}")
 
 logger = Logger(LOG_FILE)
 
@@ -173,6 +193,7 @@ class Story:
         self.description = description
         self.initial_idea = initial_idea
         self.root_chapters: List[Chapter] = []
+        self.last_active_chapter_id: Optional[str] = None  # New attribute
 
     def add_chapter(self, chapter: Chapter, parent_id: Optional[str] = None, version_id: Optional[str] = None):
         if parent_id is None:
@@ -214,7 +235,8 @@ class Story:
             "title": self.title,
             "description": self.description,
             "initial_idea": self.initial_idea,
-            "chapters": [chapter.to_dict() for chapter in self.root_chapters]
+            "chapters": [chapter.to_dict() for chapter in self.root_chapters],
+            "last_active_chapter_id": self.last_active_chapter_id  # Include in the dictionary
         }
 
 # Parsing and Processing Functions
@@ -232,18 +254,26 @@ def parse_list_or_string(data):
     return []  # Return an empty list if data is neither a string nor a list
 
 def parse_choices(choices):
-    return parse_list_or_string(choices)
+    if isinstance(choices, str):
+        # Split the string by newlines and remove any empty lines
+        choices = [choice.strip() for choice in choices.split('\n') if choice.strip()]
+        # Remove any numbering or bullet points at the start of each choice
+        choices = [re.sub(r'^\d+\.\s*|\*\s*', '', choice) for choice in choices]
+    elif isinstance(choices, list):
+        # If it's already a list, just clean up each choice
+        choices = [re.sub(r'^\d+\.\s*|\*\s*', '', choice.strip()) for choice in choices]
+    return choices
 
 def parse_title_options(options):
     return parse_list_or_string(options)
 
 def process_story_idea(story_idea: str) -> Dict:
     result = strict_json(
-        system_prompt="You are a helpful assistant that processes story ideas and generates title options.",
-        user_prompt=f"Process this story idea and provide a rehashed description and 3 title options: {story_idea}",
+        system_prompt="You're chatting with a friend about a story idea. Keep it casual and fun.",
+        user_prompt=f"Hey, I've got this story idea: {story_idea}. Can you help me flesh it out a bit? Give me a chill description and maybe 3 cool title ideas. Nothing too fancy, just what comes to mind.",
         output_format={
-            "rehashed_description": "A reworded description of the story idea",
-            "story_title_options": "Array of 3 potential story titles"
+            "rehashed_description": "A casual, friendly description of the story idea",
+            "story_title_options": "Array of 3 potential story titles (keep 'em simple and catchy)"
         },
         model=MODEL,
         **{"client": client}
@@ -254,13 +284,19 @@ def process_story_idea(story_idea: str) -> Dict:
 
 def parse_content(content):
     if isinstance(content, list):
-        return '\n\n'.join(content)
+        content = '\n\n'.join(content)
     try:
         literal_content = ast.literal_eval(content)
         if isinstance(literal_content, list):
-            return '\n\n'.join(literal_content)
-    except Exception:
+            content = '\n\n'.join(literal_content)
+        elif isinstance(literal_content, str):
+            content = literal_content
+    except (ValueError, SyntaxError):
         pass
+    
+    # Remove leading/trailing double single quotes
+    content = content.strip("''")
+    
     return content
 
 # Content Generation Functions
@@ -273,6 +309,10 @@ def generate_content(prompt: str, output_format: Dict, system_prompt: str = "", 
         logger.log(f"Output format: {output_format}")
         logger.log(f"Temperature: {temperature}")
         logger.silent = False
+
+        # Add author style to system prompt
+        author_style = f"Write in the style of one of these authors: {', '.join(AUTHORS)}. "
+        system_prompt = author_style + system_prompt
 
         result = strict_json(
             system_prompt=system_prompt,
@@ -296,36 +336,35 @@ def generate_content(prompt: str, output_format: Dict, system_prompt: str = "", 
         return {"error": str(e)}
 
 def generate_chapter_content(selected_title: str, selected_chapter_title: str, chapter_number: str, story_summary: str, initial_idea: str, chapter_history: str = "", user_choice: Optional[str] = None, existing_content: Optional[str] = None) -> Dict:
-    user_choice_prompt = f"\n\nUser chose: {user_choice}" if user_choice else ""
-    existing_content_prompt = f"\n\nExisting content: {existing_content}" if existing_content else ""
-    chapter_history_prompt = f"\n\nRecent chapter history:\n{chapter_history}" if chapter_history else ""
-    prompt = (f'Write a chapter titled "{selected_chapter_title}" for the story "{selected_title}". '
-              f'The chapter should be roughly 500 characters. Include a call to action and at least two choices '
-              f'for the reader to continue the story. Also, provide a brief summary of how this chapter affects '
-              f'the overall story state.\n\n'
-              f'Initial story idea: {initial_idea}\n\n'
-              f'Story summary so far: {story_summary}\n\n'
-              f'{chapter_history_prompt}'
-              f'How the user chose to continue the story: {user_choice_prompt}'
-              f'{existing_content_prompt}')
-    
+    user_choice_prompt = f"\n\nSo, the reader went with: {user_choice}" if user_choice else ""
+    existing_content_prompt = f"\n\nHere's what we've got so far: {existing_content}" if existing_content else ""
+    chapter_history_prompt = f"\n\nQuick recap:\n{chapter_history}" if chapter_history else ""
+    prompt = (f"Alright, let's write the next bit for '{selected_title}'. We're on {selected_chapter_title}. "
+              f"Keep it fun, and engaging. Throw in a question at the end to keep things interesting, "
+              f"and give the reader a couple of options for what happens next."
+              f"Here's where we're at: {story_summary}\n\n"
+              f"{chapter_history_prompt}"
+              f"{user_choice_prompt}"
+              f"{existing_content_prompt}")
     
     output_format = {
-        "content": "A pure string of text of the chapter in the format of paragraphs with double newlines between each paragraph. A minimum of 3 paragraphs and a max of 6 paragraphs.",
-        "what_changed": "A brief summary of how this chapter affects the overall story state.",
-        "call_to_action": "A compelling call to action for the reader.",
-        "choices": "An array of at least two possible choices for the reader to continue the story.",
+        "content": "The next part of the story, casual and engaging. 3-5 paragraphs. A paragraph is 3-5 sentences. Well formatted with \\n\\n to seperate paragraphs. Do not output a block of text without \\n\\n to seperate paragraphs. When someone speaks dictate this with \\n\\n\\n before and after their dialogue to seperate it from the rest of the text.",
+        "chapter_title": "A chill title for this part, based on what happens.",
+        "what_changed": "A quick note on how this part shakes things up.",
+        "call_to_action": "A casual question to get the reader thinking about what's next.",
+        "choices": "A string array of choices for the path of the story to continue. ie. ['path1', 'path2', ...]",
     }
     
-    result = generate_content(prompt, output_format, f"You are a creative writer tasked with writing a short chapter. The chapter number is {chapter_number}.")
+    result = generate_content(prompt, output_format, f"You're telling a story to a friend. Keep it casual and fun. This is part {chapter_number}.")
     
     if "error" in result:
-        logger.log(f"Error generating chapter content: {result['error']}")
+        logger.log(f"Oops, hit a snag generating the chapter: {result['error']}")
         return {
-            "content": ["An error occurred while generating the chapter content."],
-            "what_changed": "Error occurred",
-            "call_to_action": "Please try again",
-            "choices": ["Retry", "Go back"]
+            "content": ["Sorry, something went wrong while coming up with the next part."],
+            "chapter_title": f"Part {chapter_number}",
+            "what_changed": "We hit a roadblock",
+            "call_to_action": "Want to give it another shot?",
+            "choices": ["Try again", "Let's back up a bit"]
         }
     
     result["choices"] = parse_choices(result.get("choices", []))
@@ -337,38 +376,41 @@ def generate_expanded_content(story_title: str, chapter_title: str, existing_con
               f'Expand and enhance the following chapter content for the story "{story_title}", chapter "{chapter_title}". '
               f'Story content so far: {existing_content}... -continue here but output the whole content-\n\n'
               f'The expanded content should be at least 50% longer than the original and include new details, dialogue, or descriptions. '
-              f'Do not simply repeat the existing content.\n\n')
+              f'When someone speaks dictate this with \\n\\n\\n before and after their dialogue to seperate it from the rest of the text.'
+              f'Do not simply repeat the existing content.')
               
     
     output_format = {
-        "expanded_content": "The expanded and enhanced content of the chapter."
+        "expanded_content": "The expanded and enhanced content of the chapter. A paragraph is 4-7 sentences. Well formatted with \\n\\n to seperate paragraphs. When someone speaks dictate this with \\n\\n\\n before and after their dialogue to seperate it from the rest of the text."
     }
     
     result = generate_content(prompt, output_format, "You are a creative writer tasked with expanding and improving an existing chapter. Be creative and add substantial new content.")
     return result["expanded_content"]
 
 def generate_summary(previous_summary: str, new_content: str, initial_idea: str) -> str:
-    prompt = (f"Given the following information, provide a concise summary of the story so far, including the initial idea:\n\n"
-              f"Initial idea: {initial_idea}\n\nPrevious summary: {previous_summary}\n\nNew content: {new_content}")
+    prompt = (f"Hey, can you give me a quick recap of where we're at in the story? "
+              f"Here's how it started: {initial_idea}\n\n"
+              f"Last time, we were here: {previous_summary}\n\n"
+              f"And we just added this: {new_content}")
     
     output_format = {
-        "summary": "A concise summary of the story progress, including key events and decisions"
+        "summary": "A casual, brief summary of the story so far, hitting the main points"
     }
     
-    result = generate_content(prompt, output_format, "You are a helpful assistant that summarizes story progress.")
+    result = generate_content(prompt, output_format, "You're catching a friend up on a story you're writing together. Keep it casual and to the point.")
     try:
         return result["summary"]
     except Exception as e:
-        logger.log(f"Error generating summary: {str(e)}")
+        logger.log(f"Whoops, something went wrong with the summary: {str(e)}")
         logger.log(result)
         return previous_summary
 
 def process_custom_choice(custom_choice: str, call_to_action: str) -> str:
     return strict_json(
-        system_prompt="You are a helpful assistant that rephrases user choices into story continuations.",
-        user_prompt=f'Rephrase this custom choice as a continuation of the story, based on the call to action: "{call_to_action}". Custom choice: "{custom_choice}"',
+        system_prompt="You're helping a friend continue their story. Keep it casual and fun.",
+        user_prompt=f"So, the story's at this point: '{call_to_action}' and my friend suggested we go with '{custom_choice}'. How should we work that into the story?",
         output_format={
-            "rephrased_choice": "A rephrased version of the custom choice that fits the story context"
+            "rephrased_choice": "A casual way to continue the story based on the friend's idea"
         },
         model=MODEL,
         **{"client": client}
@@ -406,6 +448,7 @@ def load_story(story_title: str) -> Optional[Story]:
         
         story = Story(story_data['title'], story_data['description'], story_data['initial_idea'])
         story.root_chapters = _load_chapters_recursive(story_data['chapters'])
+        story.last_active_chapter_id = story_data.get('last_active_chapter_id')  # Load the last active chapter ID
         return story
     except Exception as e:
         logger.log(f"Error loading story: {e}")
@@ -583,32 +626,50 @@ def get_chapter_history(story: Story, current_chapter: Chapter, n: int = 6) -> s
 
     for ch in chapters:
         latest_version = ch.get_latest_version()
-        history.append(f"====.. Chapter {ch.id} ..====")
+        history.append(draw_line('='))
+        history.append(center_text(f" {ch.title} ", '='))
+        history.append(draw_line('='))
         history.append(parse_content(latest_version.content))
-        history.append("------------------------")
+        history.append(draw_line('-'))
         history.append(ch.what_changed)
-        history.append("------------------------")
+        history.append(draw_line('-'))
         history.append(latest_version.call_to_action)
+        history.append(draw_line('-'))
         history.append(f"[ User chose: {ch.user_choice} ]" if ch.user_choice else "[ Root chapter ]")
+        history.append(draw_line('='))
 
     return "\n\n".join(history)
 
 def refine_story_idea(initial_idea: str) -> Dict:
+    original_idea = initial_idea
+    user_feedback = ""
+    latest_description = ""
     while True:
-        story_process = process_story_idea(initial_idea)
+        prompt = f"""
+        Original idea: {original_idea}
+        Latest description: {latest_description}
+        User feedback: {user_feedback}
+
+        Based on the original idea, the latest description (if any), and the user's feedback,
+        provide a refined description of the story idea. If this is the first iteration,
+        focus on expanding and clarifying the original idea.
+        """
+        
+        story_process = process_story_idea(prompt)
         
         clear_console()
-        logger.log(f"\nRehashed Description:\n{story_process['rehashed_description']}\n")
-        logger.log("Does this description cover the core idea of what you want?")
-        logger.log("Press Enter or 'y' to accept, or type your feedback to refine the description.")
+        logger.log(f"\nRefined Description:\n{story_process['rehashed_description']}\n")
+        logger.log("Does this description accurately capture your story idea?")
+        logger.log("Enter 'y' to accept, or provide feedback to further refine the description.")
         
         user_response = get_user_input("Your response: ").strip().lower()
         
-        if user_response == '' or user_response == 'y':
+        if user_response == 'y':
             logger.log("\nGreat! The description is finalized.")
             return story_process
         else:
-            initial_idea += f" | Rehashed description: {story_process['rehashed_description'].strip()} | User feedback: {user_response.strip()}"
+            latest_description = story_process['rehashed_description']
+            user_feedback = user_response
 
 # Main Editor Function
 @log_function
@@ -649,7 +710,7 @@ def editor_mode():
         initial_idea = get_user_input("Enter your story idea: ")
         story_process = refine_story_idea(initial_idea)
 
-        logger.log("\nFinal Rehashed Description:")
+        logger.log("\nFinal Refined Description:")
         logger.log(story_process["rehashed_description"])
 
         logger.log("\nStory Title Options:")
@@ -667,9 +728,19 @@ def editor_mode():
         story = Story(selected_title, story_process["rehashed_description"], initial_idea)
 
     if story:
-        current_chapter = story.get_last_chapter()
-        current_chapter_id = current_chapter.id if current_chapter else None
-        story_summary = story.description
+        if story.last_active_chapter_id:
+            current_chapter = story.get_chapter_by_id(story.last_active_chapter_id)
+            if current_chapter:
+                current_chapter_id = current_chapter.id
+                story_summary = current_chapter.story_summary
+            else:
+                current_chapter = story.get_last_chapter()
+                current_chapter_id = current_chapter.id if current_chapter else None
+                story_summary = story.description
+        else:
+            current_chapter = story.get_last_chapter()
+            current_chapter_id = current_chapter.id if current_chapter else None
+            story_summary = story.description
     else:
         current_chapter_id = None
         story_summary = story.description
@@ -693,11 +764,13 @@ def editor_mode():
             logger.log("\n")
 
             # Display current chapter data
+            logger.silent = True
             logger.log(f"ID: {current_chapter.id}")
             logger.log(f"Title: {current_chapter.title}")
             logger.log(f"Version: {current_version.id}")
             logger.log(f"Created at: {current_version.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
-            logger.log(center_text(f" Chapter {current_chapter.id} "))
+            logger.silent = False
+            logger.log(center_text(f" {current_chapter.title} "))
             logger.log("\n")
             logger.log(parse_content(current_version.content))  # Use parse_content here
             logger.log("\n")
@@ -731,7 +804,13 @@ def editor_mode():
                 if choice.lower() == 'b':
                     # Go back to the previous chapter
                     if current_chapter.parent_id:
-                        current_chapter_id = current_chapter.parent_id
+                        parent_chapter = story.get_chapter_by_id(current_chapter.parent_id)
+                        if parent_chapter:
+                            current_chapter_id = parent_chapter.id
+                            # Update the story summary to the parent chapter's summary
+                            story_summary = parent_chapter.story_summary
+                        else:
+                            logger.log("Error: Parent chapter not found.")
                     else:
                         logger.log("You're already at the start of the story.")
                 elif choice.lower() == 'm':
@@ -758,56 +837,57 @@ def editor_mode():
                     story_modified = True
                     # Update the current version to the new expanded version
                     current_version = new_version
+                    # Don't update the story summary here
             elif choice.isdigit() and 1 <= int(choice) <= total_choices:
                 choice_index = int(choice) - 1
                 if choice_index < len(current_version.choices):
                     # AI-suggested choice
                     selected_choice = current_version.choices[choice_index]
                     existing_child = next((child for child in current_version.children if child.user_choice == selected_choice), None)
+                    if existing_child:
+                        current_chapter_id = existing_child.id
+                        story_summary = generate_summary(current_chapter.story_summary, existing_child.get_latest_version().content, story.initial_idea)
+                    else:
+                        # Generate new chapter for AI-suggested choice
+                        new_chapter_id = generate_chapter_id(current_chapter.id, story)
+                        chapter_history = get_chapter_history(story, current_chapter)
+                        logger.log("Generating new chapter content for AI-suggested choice...")
+                        chapter_content = generate_chapter_content(
+                            selected_title=story.title,
+                            selected_chapter_title=f"Chapter {new_chapter_id}",
+                            chapter_number=new_chapter_id,
+                            story_summary=story_summary,
+                            initial_idea=story.initial_idea,
+                            chapter_history=chapter_history,
+                            user_choice=selected_choice
+                        )
+                        if "error" in chapter_content:
+                            logger.log(f"Error occurred while generating chapter content: {chapter_content['error']}")
+                            continue  # Skip to the next iteration of the loop
+
+                        logger.log("New chapter content generated successfully for AI-suggested choice.")
+                        new_chapter = Chapter(
+                            new_chapter_id,
+                            chapter_content["chapter_title"],  # Use the AI-generated title
+                            story_summary,
+                            selected_choice,
+                            current_chapter.id
+                        )
+                        new_chapter.add_version(
+                            parse_content(chapter_content["content"]),
+                            chapter_content["call_to_action"],
+                            chapter_content["choices"],
+                            chapter_content["what_changed"]
+                        )
+                        story.add_chapter(new_chapter, current_chapter.id)
+                        current_chapter_id = new_chapter.id
+                        story_modified = True
+                        logger.log(f"New chapter {new_chapter_id} added to the story for AI-suggested choice.")
                 else:
                     # Existing child chapter
                     existing_child = existing_children[choice_index - len(current_version.choices)]
-                    selected_choice = existing_child.user_choice
-
-                if existing_child:
                     current_chapter_id = existing_child.id
                     story_summary = generate_summary(current_chapter.story_summary, existing_child.get_latest_version().content, story.initial_idea)
-                else:
-                    # Generate new chapter
-                    new_chapter_id = generate_chapter_id(current_chapter.id, story)
-                    chapter_history = get_chapter_history(story, current_chapter)
-                    logger.log("Generating new chapter content...")
-                    chapter_content = generate_chapter_content(
-                        selected_title=story.title,
-                        selected_chapter_title=f"Chapter {new_chapter_id}",
-                        chapter_number=new_chapter_id,
-                        story_summary=story_summary,
-                        initial_idea=story.initial_idea,
-                        chapter_history=chapter_history,
-                        user_choice=selected_choice
-                    )
-                    if "error" in chapter_content:
-                        logger.log(f"Error occurred while generating chapter content: {chapter_content['error']}")
-                        continue  # Skip to the next iteration of the loop
-
-                    logger.log("New chapter content generated successfully.")
-                    new_chapter = Chapter(
-                        new_chapter_id,
-                        f"Chapter {new_chapter_id}",
-                        story_summary,
-                        selected_choice,
-                        current_chapter.id
-                    )
-                    new_chapter.add_version(
-                        parse_content(chapter_content["content"]),
-                        chapter_content["call_to_action"],
-                        chapter_content["choices"],
-                        chapter_content["what_changed"]
-                    )
-                    story.add_chapter(new_chapter, current_chapter.id)
-                    current_chapter_id = new_chapter.id
-                    story_modified = True
-                    logger.log(f"New chapter {new_chapter_id} added to the story.")
             else:
                 # Handle custom choice (generate new chapter)
                 new_chapter_id = generate_chapter_id(current_chapter.id, story)
@@ -830,7 +910,7 @@ def editor_mode():
                 logger.log("New chapter content generated successfully for custom choice.")
                 new_chapter = Chapter(
                     new_chapter_id,
-                    f"Chapter {new_chapter_id}",
+                    chapter_content["chapter_title"],  # Use the AI-generated title
                     story_summary,
                     custom_choice,
                     current_chapter.id
@@ -861,7 +941,7 @@ def editor_mode():
             )
             new_chapter = Chapter(
                 new_chapter_id,
-                f"Chapter {new_chapter_id}",
+                chapter_content["chapter_title"],  # Use the AI-generated title
                 story_summary,
                 None,
                 None
@@ -876,9 +956,12 @@ def editor_mode():
             current_chapter_id = new_chapter.id
             story_modified = True
 
-        # Update the story summary after each chapter
-        if story_modified:
+        # Update the story summary only when a new chapter is added
+        if story_modified and current_chapter_id != story.last_active_chapter_id:
             story_summary = generate_summary(story_summary, current_version.content if current_version else "", story.initial_idea)
+
+        # Update the last_active_chapter_id before saving
+        story.last_active_chapter_id = current_chapter_id
 
         # Save the story only if it has been modified
         if story_modified:
@@ -887,7 +970,7 @@ def editor_mode():
 
 # Initialization Function
 def initialize_log():
-    if os.getenv("C_LOG") == "True":
+    if not (os.getenv("C_LOG") == "False"):
         with open(LOG_FILE, 'w', encoding='utf-8') as f:
             f.write("")
     logger.silent = True
