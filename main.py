@@ -15,6 +15,7 @@ from contextlib import contextmanager
 import shutil
 from collections import deque
 import re
+import textwrap
 
 try:
     import readline
@@ -29,8 +30,9 @@ os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
 
 # MODEL = "mistralai/mistral-large"
 # MODEL = "openai/gpt-4o-mini"
-MODEL = "mistralai/mistral-7b-instruct:nitro"
+# MODEL = "mistralai/mistral-7b-instruct:nitro"
 # MODEL = "nousresearch/hermes-3-llama-3.1-70b"
+MODEL = "nousresearch/hermes-3-llama-3.1-405b"
 
 # Initialize OpenAI client
 client = OpenAI(
@@ -61,19 +63,23 @@ class Logger:
             (re.compile(r'C:\\Users\\[^\\]+\\'), r'C:\\Users\\USER\\'),
             (re.compile(r'/home/[^/]+/'), r'/home/user/'),
         ]
+        self.terminal_width = shutil.get_terminal_size().columns - 1
 
     def apply_privacy_filter(self, message):
         for pattern, replacement in self.privacy_filters:
             message = pattern.sub(replacement, message)
         return message
 
-    def log(self, message, end='\n'):
+    def log(self, message, end='\n', nowrap=False):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         filtered_message = self.apply_privacy_filter(message)
         
+        # Wrap the message only if nowrap is False
+        output_message = filtered_message if nowrap else self.wrap_text(filtered_message)
+        
         if not self.silent:
-            sys.__stdout__.write(filtered_message + end)
+            sys.__stdout__.write(output_message + end)
             sys.__stdout__.flush()
         
         with open(self.log_file, 'a', encoding='utf-8') as f:
@@ -87,6 +93,16 @@ class Logger:
         exception_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
         filtered_exception_str = self.apply_privacy_filter(exception_str)
         self.log(f"An exception occurred:\n{filtered_exception_str}")
+
+    def wrap_text(self, text):
+        # Split the text into lines
+        lines = text.split('\n')
+        wrapped_lines = []
+        for line in lines:
+            # Wrap each line
+            wrapped = textwrap.fill(line, width=self.terminal_width, break_long_words=False, replace_whitespace=False)
+            wrapped_lines.append(wrapped)
+        return '\n'.join(wrapped_lines)
 
 logger = Logger(LOG_FILE)
 
@@ -504,31 +520,34 @@ def increment_suffix(suffix: str) -> str:
     return suffix[:-1] + chr(ord(suffix[-1]) + 1)
 
 def generate_chapter_id(parent_id: Optional[str], story: Story) -> str:
-    if parent_id is None:
+    if parent_id is None or parent_id == "":
         # Generate a root chapter ID
         existing_ids = [chapter.id for chapter in story.root_chapters]
-        next_number = max([int(id.split('a')[0]) for id in existing_ids], default=0) + 1
-        return f"{next_number}a"
+        next_number = max([int(id.strip('abcdefghijklmnopqrstuvwxyz')) for id in existing_ids], default=0) + 1
+        return f"{next_number}"
     else:
         parent_chapter = story.get_chapter_by_id(parent_id)
         if not parent_chapter:
             raise ValueError(f"Parent chapter with id {parent_id} not found")
         
-        parent_number = int(parent_id[:-1])
+        parent_number = int(parent_id.strip('abcdefghijklmnopqrstuvwxyz'))
         
         existing_children = [
             child for child in parent_chapter.get_latest_version().children
-            if child.id.startswith(str(parent_number + 1))
+            if child.id.startswith(str(parent_number))
         ]
         
         if not existing_children:
             # First child of this parent
-            return f"{parent_number + 1}a"
+            return f"{parent_number}a"
         else:
             # Subsequent children
-            last_child_letter = max(child.id[-1] for child in existing_children)
-            next_letter = chr(ord(last_child_letter) + 1)
-            return f"{parent_number + 1}{next_letter}"
+            last_child_suffix = max(child.id[len(str(parent_number)):] for child in existing_children)
+            if last_child_suffix == "":
+                return f"{parent_number}a"
+            else:
+                next_suffix = chr(ord(last_child_suffix) + 1)
+                return f"{parent_number}{next_suffix}"
 
 def display_chapter_tree(chapters: List[Chapter], indent: str = "", current_version: Optional[ChapterVersion] = None):
     for chapter in chapters:
@@ -611,6 +630,13 @@ def center_text(text: str, fill_char: str = '=') -> str:
 
 def draw_line(fill_char: str = '=') -> str:
     return fill_char * get_terminal_width()
+
+# Update these functions to use the nowrap parameter
+def print_centered_text(text: str, fill_char: str = '='):
+    logger.log(center_text(text, fill_char), nowrap=True)
+
+def print_line(fill_char: str = '='):
+    logger.log(draw_line(fill_char), nowrap=True)
 
 def get_chapter_history(story: Story, current_chapter: Chapter, n: int = 6) -> str:
     history = []
@@ -710,9 +736,6 @@ def editor_mode():
         initial_idea = get_user_input("Enter your story idea: ")
         story_process = refine_story_idea(initial_idea)
 
-        logger.log("\nFinal Refined Description:")
-        logger.log(story_process["rehashed_description"])
-
         logger.log("\nStory Title Options:")
         for index, title in enumerate(story_process["story_title_options"], 1):
             logger.log(f"{index}. {title}")
@@ -758,9 +781,9 @@ def editor_mode():
         clear_console()
         if current_chapter and current_version:
             # Display story summary
-            logger.log(center_text(" Story Summary "))
+            print_centered_text(" Story Summary ")
             logger.log(story_summary)
-            logger.log(draw_line())
+            print_line()
             logger.log("\n")
 
             # Display current chapter data
@@ -770,15 +793,15 @@ def editor_mode():
             logger.log(f"Version: {current_version.id}")
             logger.log(f"Created at: {current_version.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
             logger.silent = False
-            logger.log(center_text(f" {current_chapter.title} "))
+            print_centered_text(f" {current_chapter.title} ")
             logger.log("\n")
-            logger.log(parse_content(current_version.content))  # Use parse_content here
+            logger.log(parse_content(current_version.content))
             logger.log("\n")
-            logger.log(center_text(" What Next? ", fill_char='-'))
+            print_centered_text(" What Next? ", fill_char='-')
             logger.log("\n")
             logger.log(f"{current_version.call_to_action}")
             logger.log("\n")
-            logger.log(center_text(" Choices ", fill_char='-'))
+            print_centered_text(" Choices ", fill_char='-')
 
             # Display AI-suggested choices
             for i, choice in enumerate(parse_choices(current_version.choices), 1):
@@ -787,7 +810,12 @@ def editor_mode():
             # Display existing child chapters and their choices
             existing_children = current_version.children
             for i, child in enumerate(existing_children, len(current_version.choices) + 1):
-                logger.log(f"{i}. (Chapter {child.id}) {child.user_choice}")
+                chapter_id = child.id
+                if chapter_id.isdigit():
+                    chapter_display = f"Chapter {chapter_id}"
+                else:
+                    chapter_display = f"Chapter {chapter_id[:-1]}{chapter_id[-1].lower()}"
+                logger.log(f"{i}. ({chapter_display}) {child.user_choice}")
 
             total_choices = len(current_version.choices) + len(existing_children)
             
@@ -796,7 +824,7 @@ def editor_mode():
             logger.log("Press m to open menu")
             logger.log("Press e to expand the current chapter")
             logger.log("Press vm to view version menu")
-            logger.log(draw_line())
+            print_line()
 
             choice = get_user_input("Select a choice, enter your own idea, or navigate: ")
             if choice.lower() in ['b', 'm', 'vm', 'e']:
