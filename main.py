@@ -31,8 +31,8 @@ os.environ["OPENAI_API_BASE"] = "https://openrouter.ai/api/v1"
 # MODEL = "mistralai/mistral-large"
 # MODEL = "openai/gpt-4o-mini"
 # MODEL = "mistralai/mistral-7b-instruct:nitro"
-# MODEL = "nousresearch/hermes-3-llama-3.1-70b"
-MODEL = "nousresearch/hermes-3-llama-3.1-405b"
+MODEL = "nousresearch/hermes-3-llama-3.1-70b"
+# MODEL = "nousresearch/hermes-3-llama-3.1-405b"
 
 # Initialize OpenAI client
 client = OpenAI(
@@ -371,7 +371,7 @@ def generate_chapter_content(selected_title: str, selected_chapter_title: str, c
         "choices": "A string array of choices for the path of the story to continue. ie. ['path1', 'path2', ...]",
     }
     
-    result = generate_content(prompt, output_format, f"You're telling a story to a friend. Keep it casual and fun. This is part {chapter_number}.")
+    result = generate_content(prompt, output_format, f"You're writting a detailed story. This is part {chapter_number}.")
     
     if "error" in result:
         logger.log(f"Oops, hit a snag generating the chapter: {result['error']}")
@@ -523,31 +523,33 @@ def generate_chapter_id(parent_id: Optional[str], story: Story) -> str:
     if parent_id is None or parent_id == "":
         # Generate a root chapter ID
         existing_ids = [chapter.id for chapter in story.root_chapters]
-        next_number = max([int(id.strip('abcdefghijklmnopqrstuvwxyz')) for id in existing_ids], default=0) + 1
+        next_number = max([int(id) for id in existing_ids], default=0) + 1
         return f"{next_number}"
     else:
         parent_chapter = story.get_chapter_by_id(parent_id)
         if not parent_chapter:
             raise ValueError(f"Parent chapter with id {parent_id} not found")
         
-        parent_number = int(parent_id.strip('abcdefghijklmnopqrstuvwxyz'))
+        # Get all direct children of the parent chapter
+        children = parent_chapter.get_latest_version().children
         
-        existing_children = [
-            child for child in parent_chapter.get_latest_version().children
-            if child.id.startswith(str(parent_number))
-        ]
-        
-        if not existing_children:
+        if not children:
             # First child of this parent
-            return f"{parent_number}a"
+            return f"{int(parent_id) + 1}"
         else:
-            # Subsequent children
-            last_child_suffix = max(child.id[len(str(parent_number)):] for child in existing_children)
-            if last_child_suffix == "":
-                return f"{parent_number}a"
+            # Check if there's already a non-lettered sibling
+            non_lettered_sibling = next((child for child in children if child.id.isdigit()), None)
+            if non_lettered_sibling:
+                # If there's a non-lettered sibling, start lettering
+                existing_letters = [child.id[-1] for child in children if not child.id.isdigit()]
+                if not existing_letters:
+                    return f"{non_lettered_sibling.id}a"
+                else:
+                    next_letter = chr(ord(max(existing_letters)) + 1)
+                    return f"{non_lettered_sibling.id}{next_letter}"
             else:
-                next_suffix = chr(ord(last_child_suffix) + 1)
-                return f"{parent_number}{next_suffix}"
+                # If no non-lettered sibling, create one
+                return f"{int(parent_id) + 1}"
 
 def display_chapter_tree(chapters: List[Chapter], indent: str = "", current_version: Optional[ChapterVersion] = None):
     for chapter in chapters:
@@ -724,6 +726,8 @@ def editor_mode():
         story = load_story(story_title)
         if story:
             logger.log(f"\nLoaded existing story: {story.title}")
+            update_chapter_ids(story)
+            save_story(story)
         else:
             logger.log(f"\nFailed to load story: {story_title}")
             return
@@ -826,10 +830,10 @@ def editor_mode():
             logger.log("Press vm to view version menu")
             print_line()
 
-            choice = get_user_input("Select a choice, enter your own idea, or navigate: ")
-            if choice.lower() in ['b', 'm', 'vm', 'e']:
-
-                if choice.lower() == 'b':
+            choice = get_user_input("Select a choice, enter your own idea, or navigate: ").strip().lower()
+            
+            if choice in ['b', 'm', 'vm', 'e']:
+                if choice == 'b':
                     # Go back to the previous chapter
                     if current_chapter.parent_id:
                         parent_chapter = story.get_chapter_by_id(current_chapter.parent_id)
@@ -841,7 +845,7 @@ def editor_mode():
                             logger.log("Error: Parent chapter not found.")
                     else:
                         logger.log("You're already at the start of the story.")
-                elif choice.lower() == 'm':
+                elif choice == 'm':
                     # Show menu of all chapters
                     clear_console()
                     logger.log("\nAll Chapters:")
@@ -851,14 +855,19 @@ def editor_mode():
                     logger.log("-" * 40)
                     back_choice = get_user_input("Enter the ID of the chapter you want to go to (or press Enter to stay): ")
                     if back_choice:
-                        current_chapter_id = back_choice if story.get_chapter_by_id(back_choice) else current_chapter_id
-                elif choice.lower() == 'vm':
+                        selected_chapter = story.get_chapter_by_id(back_choice)
+                        if selected_chapter and selected_chapter.id == back_choice:
+                            current_chapter_id = back_choice
+                            story_summary = selected_chapter.story_summary
+                        else:
+                            logger.log(f"Chapter with ID {back_choice} not found.")
+                elif choice == 'vm':
                     # Show version menu
                     clear_console()
                     selected_version = display_version_menu(current_chapter)
                     if selected_version:
                         current_version = selected_version
-                elif choice.lower() == 'e':
+                elif choice == 'e':
                     # Expand the current chapter
                     new_version = expand_chapter_content(current_chapter, story)
                     logger.log("\nChapter expanded successfully!")
@@ -1011,6 +1020,23 @@ def initialize_log():
     
     # Set up exception handling to log all unhandled exceptions
     sys.excepthook = logger.log_exception
+
+def update_chapter_ids(story: Story):
+    def update_recursive(chapters: List[Chapter], parent_id: Optional[str] = None):
+        for i, chapter in enumerate(chapters):
+            if parent_id is None:
+                chapter.id = str(i + 1)
+            else:
+                if i == 0:
+                    chapter.id = str(int(parent_id) + 1)
+                else:
+                    chapter.id = f"{int(parent_id) + 1}{chr(ord('a') + i - 1)}"
+            chapter.parent_id = parent_id
+            latest_version = chapter.get_latest_version()
+            if latest_version:
+                update_recursive(latest_version.children, chapter.id)
+
+    update_recursive(story.root_chapters)
 
 if __name__ == "__main__":
     initialize_log()
